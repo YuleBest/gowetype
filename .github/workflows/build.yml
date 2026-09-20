@@ -1,0 +1,75 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: 格式检查
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "这些文件没格式化："
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: 静态检查
+        run: go vet ./...
+
+      - name: 交叉编译
+        run: |
+          set -eu
+          mkdir -p dist
+          for target in \
+            linux/amd64 linux/arm64 \
+            android/arm64 \
+            darwin/amd64 darwin/arm64 \
+            windows/amd64
+          do
+            os=${target%/*}
+            arch=${target#*/}
+            ext=""
+            [ "$os" = windows ] && ext=".exe"
+            out="dist/gowetype-${os}-${arch}${ext}"
+            echo "构建 $out"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+              go build -trimpath -ldflags "-s -w" -o "$out" .
+          done
+          cd dist && sha256sum ./* > SHA256SUMS && cat SHA256SUMS
+
+      - name: 冒烟测试
+        run: |
+          go build -o /tmp/gowetype .
+          /tmp/gowetype help | head -1
+          # 指到不存在的目录应当以非零退出并给出提示，而不是崩掉
+          if /tmp/gowetype list -data /nonexistent 2>/dev/null; then
+            echo "指向不存在的目录时不该返回成功"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gowetype
+          path: dist/
+
+      - name: 上传到 Release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber
